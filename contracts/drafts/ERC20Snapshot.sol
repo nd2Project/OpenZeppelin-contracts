@@ -6,19 +6,28 @@ import "../drafts/Counters.sol";
 import "../token/ERC20/ERC20.sol";
 
 /**
- * @title ERC20 token with snapshots.
- * @dev Inspired by Jordi Baylina's
- * https://github.com/Giveth/minimd/blob/ea04d950eea153a04c51fa510b068b9dded390cb/contracts/MiniMeToken.sol[MiniMeToken]
- * to record historical balances.
+ * @dev This contract extends an ERC20 token with a snapshot mechanism. When a snapshot is created, the balances and
+ * total supply at the time are recorded for later access.
  *
- * When a snapshot is made, the balances and total supply at the time of the snapshot are recorded for later
- * access.
+ * This can be used to safely create mechanisms based on token balances such as trustless dividends or weighted voting.
+ * In naive implementations it's possible to perform a "double spend" attack by reusing the same balance from different
+ * accounts. By using snapshots to calculate dividends or voting power, those attacks no longer apply. It can also be
+ * used to create an efficient ERC20 forking mechanism.
  *
- * To make a snapshot, call the {snapshot} function, which will emit the {Snapshot} event and return a snapshot id.
- * To get the total supply from a snapshot, call the function {totalSupplyAt} with the snapshot id.
- * To get the balance of an account from a snapshot, call the {balanceOfAt} function with the snapshot id and the
- * account address.
- * @author Validity Labs AG <info@validitylabs.org>
+ * Snapshots are created by the internal {snapshot} function, which will emit the {Snapshot} event and return a
+ * snapshot id. To get the total supply at the time of a snapshot, call the function {totalSupplyAt} with the snapshot
+ * id. To get the balance of an account at the time of a snapshot, call the {balanceOfAt} function with the snapshot id
+ * and the account address.
+ *
+ * ==== Gas Costs
+ *
+ * Snapshots are efficient. Snapshot creation is _O(1)_. Retrieval of balances or total supply from a snapshot is _O(log
+ * n)_ in the number of snapshots that have been created, although _n_ for a specific account will generally be much
+ * smaller since identical balances in subsequent snapshots are stored as a single entry.
+ *
+ * There is a constant overhead for normal ERC20 transfers due to the additional snapshot bookkeeping. This overhead is
+ * only significant for the first transfer that immediately follows a snapshot for a particular account. Subsequent
+ * transfers will have normal cost until the next snapshot, and so on.
  */
 contract ERC20Snapshot is ERC20 {
     using SafeMath for uint256;
@@ -38,11 +47,34 @@ contract ERC20Snapshot is ERC20 {
     // Snapshot ids increase monotonically, with the first value being 1. An id of 0 is invalid.
     Counters.Counter private _currentSnapshotId;
 
+    /**
+     * @dev Emitted by {snapshot} when a snapshot identified by `id` is created.
+     */
     event Snapshot(uint256 id);
 
-    // Creates a new snapshot id. Balances are only stored in snapshots on demand: unless a snapshot was taken, a
-    // balance change will not be recorded. This means the extra added cost of storing snapshotted balances is only paid
-    // when required, but is also flexible enough that it allows for e.g. daily snapshots.
+    /**
+     * @dev Creates a new snapshot and returns its snapshot id.
+     *
+     * Emits a {Snapshot} event that contains the same id.
+     *
+     * [WARNING]
+     * ====
+     * Since {snapshot} is `public`, it can be called by anyone. However, there is some potential for abuse by
+     * attackers. We made this decision initially because we consider the risks to be low. In version 3.0 we have
+     * decided to make this function `internal` so that each project can decide whether to take on those risks or not.
+     * If you are stuck using version 2.x, it is possible to override this public function in a derived contract and add
+     * a `require` clause so that only one or a set of accounts can call it.
+     *
+     * A public function could potentially be used by attackers in two ways.
+     *
+     * First, it can be used to increase the cost of retrieval of values from snapshots, although it will grow
+     * logarithmically thus rendering this attack ineffective in the long term. Second, it can be used to target
+     * specific accounts and increase the cost of ERC20 transfers for them, in the ways specified in the Gas Costs
+     * section above.
+     *
+     * We haven't measured the actual numbers; if this is something you're interested in please reach out to us.
+     * ====
+     */
     function snapshot() public returns (uint256) {
         _currentSnapshotId.increment();
 
@@ -51,12 +83,18 @@ contract ERC20Snapshot is ERC20 {
         return currentId;
     }
 
+    /**
+     * @dev Retrieves the balance of `account` at the time `snapshotId` was created.
+     */
     function balanceOfAt(address account, uint256 snapshotId) public view returns (uint256) {
         (bool snapshotted, uint256 value) = _valueAt(snapshotId, _accountBalanceSnapshots[account]);
 
         return snapshotted ? value : balanceOf(account);
     }
 
+    /**
+     * @dev Retrieves the total supply at the time `snapshotId` was created.
+     */
     function totalSupplyAt(uint256 snapshotId) public view returns(uint256) {
         (bool snapshotted, uint256 value) = _valueAt(snapshotId, _totalSupplySnapshots);
 
